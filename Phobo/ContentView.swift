@@ -98,7 +98,6 @@ struct ContentView: View {
     @State private var showSaveSuccessAlert = false
     @State private var showSaveErrorAlert = false
     @State private var saveErrorMessage: String = ""
-    @State private var saveResultCancellable: AnyCancellable?
     
     // 分享相关状态（使用 item 驱动的方式，避免空白 sheet）
     @State private var sharePayload: SharePayload?
@@ -686,11 +685,14 @@ struct ContentView: View {
         .onChange(of: watermarkPickerImage) { _, newValue in
             if let img = newValue {
                 imageWatermarks.append(img)
-                // 默认不自动选中新增的图片水印，交给用户手动点选
+                selectedImageWatermarkIndex = imageWatermarks.indices.last
                 watermarkPickerImage = nil
                 // 每次新增图片水印后立即持久化到磁盘
                 savePersistedImageWatermarks()
             }
+        }
+        .onChange(of: selectedImageWatermarkIndex) { _, _ in
+            saveSelectedImageWatermarkIndex()
         }
         // 监听图片选择器的显示/隐藏，选完图后自动恢复文字编辑状态（如果之前正在编辑）
         .onChange(of: showingImagePicker) { oldValue, newValue in
@@ -773,61 +775,30 @@ struct ContentView: View {
     private func saveImageWithBackground() {
         guard let originalImage = inputImage else { return }
 
-        // 1. 组装渲染配置
-        let config = RenderConfig(
-            originalImage: originalImage,
-            backgroundColor: UIColor(backgroundColor),
-            borderPercent: borderPercent,
-            aspectWidth: customAspectWidth,
-            aspectHeight: customAspectHeight,
-            watermarkText: watermarkText,
-            watermarkScale: watermarkScale,
-            watermarkFontName: watermarkFontName,
-            watermarkColor: UIColor(watermarkColor),
-            watermarkX: watermarkX,
-            watermarkY: watermarkY,
-            stickerImage: selectedStickerImage,
-            stickerScale: imageWatermarkScale,
-            stickerOpacity: imageWatermarkOpacity,
-            stickerX: imageWatermarkX,
-            stickerY: imageWatermarkY
-        )
-
-        // 2. 渲染成成品图（统一在 RenderService 内控制最长边约 4000px）
+        let config = makeRenderConfig(for: originalImage)
         let renderedImage = RenderService.render(config: config)
 
-        // 3. 订阅保存结果通知（每次保存前先取消上一次订阅，避免重复）
-        saveResultCancellable?.cancel()
-        saveResultCancellable = NotificationCenter.default
-            .publisher(for: SaveHelper.saveResultNotification)
-            .sink { notification in
-                if let success = notification.userInfo?["success"] as? Bool,
-                   let message = notification.userInfo?["message"] as? String {
-                    if success {
-                        showSaveSuccessAlert = true
-                    } else {
-                        saveErrorMessage = message
-                        showSaveErrorAlert = true
-                    }
-                }
-                // 本次事件处理完成后即可清理订阅
-                saveResultCancellable = nil
+        SaveService.saveToPhotos(image: renderedImage) { result in
+            switch result {
+            case .success:
+                showSaveSuccessAlert = true
+            case .failure(let error):
+                saveErrorMessage = error.localizedDescription
+                showSaveErrorAlert = true
             }
-
-        // 4. 使用系统提供的保存接口写入相册（沿用之前稳定的实现）
-        UIImageWriteToSavedPhotosAlbum(
-            renderedImage,
-            SaveHelper.shared,
-            #selector(SaveHelper.image(_:didFinishSavingWithError:contextInfo:)),
-            nil
-        )
+        }
     }
 
     // MARK: - 分享：通过系统 Activity View 分享当前成品图
     private func shareImageViaActivityView() {
         guard let originalImage = inputImage else { return }
-        
-        // 1. 组装渲染配置，与保存时保持一致
+
+        let renderedImage = RenderService.render(config: makeRenderConfig(for: originalImage))
+        sharePayload = SharePayload(image: renderedImage)
+    }
+
+    /// 组装保存和分享共用的渲染配置，避免两个导出入口发生参数漂移。
+    private func makeRenderConfig(for originalImage: UIImage) -> RenderConfig {
         let config = RenderConfig(
             originalImage: originalImage,
             backgroundColor: UIColor(backgroundColor),
@@ -846,10 +817,8 @@ struct ContentView: View {
             stickerX: imageWatermarkX,
             stickerY: imageWatermarkY
         )
-        
-        // 2. 渲染出成品图并构造分享负载（由 sheet(item:) 驱动展示）
-        let renderedImage = RenderService.render(config: config)
-        sharePayload = SharePayload(image: renderedImage)
+
+        return config
     }
 // MARK: - 分享负载模型（用于 sheet(item:)）
 struct SharePayload: Identifiable {
@@ -860,96 +829,27 @@ struct SharePayload: Identifiable {
 
 // MARK: - 图片水印持久化（跨启动保存）
 extension ContentView {
-
-    /// 获取图片水印存储目录：Documents/ImageWatermarks
-    private func imageWatermarksDirectoryURL() -> URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        return docs.appendingPathComponent("ImageWatermarks", isDirectory: true)
-    }
-
     /// 从磁盘加载已保存的图片水印列表，在 App 启动或视图出现时调用
     private func loadPersistedImageWatermarks() {
-        let dir = imageWatermarksDirectoryURL()
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let fm = FileManager.default
-
-            // 确保目录存在
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-
-            guard let files = try? fm.contentsOfDirectory(at: dir,
-                                                          includingPropertiesForKeys: nil,
-                                                          options: [.skipsHiddenFiles]) else {
-                return
-            }
-
-            // 按文件名排序，保证顺序稳定
-            let sortedFiles = files.sorted { $0.lastPathComponent < $1.lastPathComponent }
-
-            var loaded: [UIImage] = []
-            for url in sortedFiles {
-                autoreleasepool {
-                    if let data = try? Data(contentsOf: url),
-                       let img = UIImage(data: data) {
-                        loaded.append(img)
-                    }
-                }
-            }
-
-            // 从磁盘读取完成后，回到主线程更新状态
-            DispatchQueue.main.async {
-                self.imageWatermarks = loaded
-                // 默认不选中任何图片水印，由用户手动点选
-                self.selectedImageWatermarkIndex = nil
-            }
+        ImageWatermarkStore.load { loaded, selectedIndex in
+            self.imageWatermarks = loaded
+            self.selectedImageWatermarkIndex = selectedIndex
         }
     }
 
     /// 将当前图片水印数组保存到磁盘，并记录当前选中的索引
     private func savePersistedImageWatermarks() {
-        let dir = imageWatermarksDirectoryURL()
-        let imagesToSave = self.imageWatermarks
-        let selectedIndex = self.selectedImageWatermarkIndex
+        ImageWatermarkStore.save(
+            images: imageWatermarks,
+            selectedIndex: selectedImageWatermarkIndex
+        )
+    }
 
-        DispatchQueue.global(qos: .utility).async {
-            let fm = FileManager.default
-
-            // 确保目录存在
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-
-            // 清空旧文件
-            if let files = try? fm.contentsOfDirectory(at: dir,
-                                                       includingPropertiesForKeys: nil,
-                                                       options: [.skipsHiddenFiles]) {
-                for url in files {
-                    try? fm.removeItem(at: url)
-                }
-            }
-
-            // 逐个写入当前数组中的图片
-            for (index, img) in imagesToSave.enumerated() {
-                autoreleasepool {
-                    if let data = img.pngData() {
-                        let filename = "wm_\(index).png"
-                        let fileURL = dir.appendingPathComponent(filename)
-                        try? data.write(to: fileURL, options: .atomic)
-                    } else {
-                        // 某一张转换失败时跳过，不影响其它图片的持久化
-                    }
-                }
-            }
-
-            // 记录当前选中的索引（简单写回主线程对应的 UserDefaults）
-            DispatchQueue.main.async {
-                let defaults = UserDefaults.standard
-                let key = "ImageWatermarkSelectedIndex"
-                if let index = selectedIndex {
-                    defaults.set(index, forKey: key)
-                } else {
-                    defaults.removeObject(forKey: key)
-                }
-            }
-        }
+    private func saveSelectedImageWatermarkIndex() {
+        ImageWatermarkStore.persistSelectedIndex(
+            selectedImageWatermarkIndex,
+            imageCount: imageWatermarks.count
+        )
     }
 }
 
@@ -1101,41 +1001,6 @@ extension View {
     }
 }
 
-
-// MARK: - 保存回调工具类
-
-final class SaveHelper: NSObject {
-    static let shared = SaveHelper()
-    
-    static let saveResultNotification = Notification.Name("SaveResultNotification")
-    
-    @objc func image(_ image: UIImage,
-                     didFinishSavingWithError error: Error?,
-                     contextInfo: UnsafeRawPointer) {
-        if let error = error {
-            NotificationCenter.default.post(
-                name: SaveHelper.saveResultNotification,
-                object: nil,
-                userInfo: [
-                    "success": false,
-                    "message": error.localizedDescription
-                ]
-            )
-        } else {
-            NotificationCenter.default.post(
-                name: SaveHelper.saveResultNotification,
-                object: nil,
-                userInfo: [
-                    "success": true,
-                    "message": "保存成功"
-                ]
-            )
-        }
-    }
-}
-
-
-// MARK: - 设备姿态管理，用于 Liquid Glass 高光方向（仿 Apple 官方动态高光）
 
 // MARK: - 设备姿态管理，用于 Liquid Glass 高光方向（仿 Apple 官方动态高光）
 

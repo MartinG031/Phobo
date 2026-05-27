@@ -6,9 +6,18 @@ import Photos
 
 enum SaveService {
 
-    enum SaveError: Error {
+    enum SaveError: LocalizedError {
         case cannotGenerateData
         case photoLibrary(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .cannotGenerateData:
+                return "无法生成可保存的图片数据。"
+            case .photoLibrary(let message):
+                return message
+            }
+        }
     }
 
     /// 保存到相册：PNG ≤ 10MB 优先，其余情况用 JPEG 逐级压缩
