@@ -6,20 +6,9 @@ import SwiftUI
 import PhotosUI
 import Photos
 import UIKit
-import CoreMotion
-import Combine
-
-/// 编辑工具类型：边框 / 文字水印 / 图片水印（可以叠加使用）
-enum EditingTool {
-    case border
-    case watermark      // 文字水印
-    case imageWatermark // 图片水印
-}
 
 
 struct ContentView: View {
-    // 设备姿态管理，用于驱动 Liquid Glass 高光方向（仿 Apple 官方动效）
-    @StateObject private var motionManager = MotionManager()
     // 通用外边距：控制参数区域与屏幕边缘的间距（水平和底部共用）
     private let panelOuterPadding: CGFloat = 16
     // 参数大面板最小高度（整体比原来高约一行文字，用于所有功能面板统一增高）
@@ -28,6 +17,8 @@ struct ContentView: View {
     // MARK: - 选择图片 / 原图数据
     @State private var showingImagePicker = false          // 是否显示系统图片选择器
     @State private var inputImage: UIImage?                // 当前选中的原始图片（单张）
+    @State private var previewImage: UIImage?              // 当前图片的轻量预览版本
+    @State private var previewGenerationID = UUID()
     
     // MARK: - 画布外观配置
     // 背景色 = “边框颜色”（即最终导出的背景纯色）
@@ -52,17 +43,6 @@ struct ContentView: View {
     // 水印在画布上的归一化位置（0~1，表示相对于画布宽高的中心点坐标）
     @State private var watermarkX: CGFloat = 0.85
     @State private var watermarkY: CGFloat = 0.9
-    // 水平 / 垂直居中辅助线显示开关（用于拖动时的吸附效果提示）
-    @State private var showVerticalGuide: Bool = false
-    @State private var showHorizontalGuide: Bool = false
-    // 拖动状态和起点（文字水印）
-    @State private var isDraggingTextWatermark: Bool = false
-    @State private var textDragStartX: CGFloat = 0.5
-    @State private var textDragStartY: CGFloat = 0.5
-    // 拖动状态和起点（图片水印）
-    @State private var isDraggingImageWatermark: Bool = false
-    @State private var imageDragStartX: CGFloat = 0.5
-    @State private var imageDragStartY: CGFloat = 0.5
 
     // 图片水印配置
     @State private var imageWatermarks: [UIImage] = []        // 已添加的图片水印列表
@@ -82,17 +62,6 @@ struct ContentView: View {
     // 记录在弹出图片选择器之前是否处于文字水印编辑状态
     @State private var wasWatermarkEditingBeforeImagePicker: Bool = false
 
-    // 根据设备姿态计算胶囊高光的起止方向（0~1 范围）
-    private var capsuleHighlightStart: UnitPoint {
-        let d = motionManager.lightDirection
-        return UnitPoint(x: d.x, y: d.y)
-    }
-    
-    private var capsuleHighlightEnd: UnitPoint {
-        let d = motionManager.lightDirection
-        return UnitPoint(x: 1 - d.x, y: 1 - d.y)
-    }
-    
     // MARK: - 弹窗 / 弹层状态
     // 保存结果弹窗状态
     @State private var showSaveSuccessAlert = false
@@ -101,6 +70,8 @@ struct ContentView: View {
     
     // 分享相关状态（使用 item 驱动的方式，避免空白 sheet）
     @State private var sharePayload: SharePayload?
+    // 高分辨率渲染 / 编码期间禁用重复操作，并避免阻塞主线程。
+    @State private var isRenderingOutput = false
     
     // 是否显示“更多比例”编辑面板（单独弹出的底部浮层）
     @State private var showingAspectEditor = false
@@ -108,9 +79,12 @@ struct ContentView: View {
     // MARK: - 预览区域封装
     private var previewArea: some View {
         Group {
-            if let image = inputImage {
-                // 已选择图片时：预览仅展示效果，不再承担交互
+            if let image = previewImage {
+                // 已选择图片时：预览使用降采样版本，导出仍使用原图。
                 previewForImage(image)
+            } else if inputImage != nil {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 // 未选择图片时：展示占位预览，由上方“选择”按钮触发选择
                 placeholderPreview
@@ -131,412 +105,26 @@ struct ContentView: View {
     }
     
     private func previewForImage(_ image: UIImage) -> some View {
-        GeometryReader { geo in
-            let layout = computePreviewLayout(for: image, in: geo.size)
-
-            // 使用闭包惰性初始化的方式计算字体和文字尺寸，
-            // 在没有文字水印时直接返回默认值，避免多余计算。
-            let watermarkFontSize = min(layout.canvasSize.width,
-                                        layout.canvasSize.height) * CGFloat(watermarkScale)
-
-            let watermarkSwiftUIFont: Font = {
-                guard !watermarkText.isEmpty else {
-                    return .body
-                }
-                if watermarkFontName == "System" {
-                    return .system(size: watermarkFontSize, weight: .semibold)
-                } else {
-                    return .custom(watermarkFontName, size: watermarkFontSize)
-                }
-            }()
-
-            let measuredTextSize: CGSize = {
-                guard !watermarkText.isEmpty else { return .zero }
-
-                let uiFont: UIFont = {
-                    if watermarkFontName == "System" {
-                        return .systemFont(ofSize: watermarkFontSize, weight: .semibold)
-                    } else {
-                        return UIFont(name: watermarkFontName, size: watermarkFontSize)
-                            ?? .systemFont(ofSize: watermarkFontSize, weight: .semibold)
-                    }
-                }()
-
-                let text = watermarkText as NSString
-                // 限制测量宽度，模拟多行文本在预览中的换行效果
-                let maxWidth = max(layout.canvasSize.width * 0.8, 1)
-                let bounding = text.boundingRect(
-                    with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
-                    options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    attributes: [.font: uiFont],
-                    context: nil
-                )
-                return bounding.integral.size
-            }()
-
-            // 计算底部边框区域的垂直中心（归一化坐标，nil 表示无明显边框时不吸附）
-            let bottomBorderCenterY: CGFloat? = {
-                let canvasHeight = layout.canvasSize.height
-                let imageHeight = layout.imageSize.height
-                guard canvasHeight > 0 else { return nil }
-                let borderHeight = canvasHeight - imageHeight
-                // 当上下边框很窄时就不做特别吸附，避免无意义的“抖动”
-                guard borderHeight / canvasHeight > 0.05 else { return nil }
-                let imageBottom = (canvasHeight + imageHeight) / 2
-                let bottomCenter = (imageBottom + canvasHeight) / 2
-                return bottomCenter / canvasHeight
-            }()
-
-            // 左右边框区域的水平中心（归一化 X），nil 表示画布基本无左右边框
-            let leftBorderCenterX: CGFloat? = {
-                let canvasWidth = layout.canvasSize.width
-                let imageWidth = layout.imageSize.width
-                guard canvasWidth > 0 else { return nil }
-                let totalBorderWidth = canvasWidth - imageWidth
-                guard totalBorderWidth > 0 else { return nil }
-                let sideBorderWidth = totalBorderWidth / 2
-                // 当左右边框过窄时不吸附，避免无意义的抖动
-                guard sideBorderWidth / canvasWidth > 0.05 else { return nil }
-                let center = sideBorderWidth / 2
-                return center / canvasWidth
-            }()
-
-            let rightBorderCenterX: CGFloat? = {
-                guard let left = leftBorderCenterX else { return nil }
-                return 1 - left
-            }()
-
-            ZStack {
-                // 背景纯色区域（画布）
-                backgroundColor
-
-                // 原图按几何缩放后居中放置（不裁剪）
-                Image(uiImage: image)
-                    .resizable()
-                    .frame(width: layout.imageSize.width,
-                           height: layout.imageSize.height)
-
-                // 图片水印预览，可拖动
-                if let index = selectedImageWatermarkIndex,
-                   imageWatermarks.indices.contains(index) {
-                    let sticker = imageWatermarks[index]
-                    let baseLength = min(layout.canvasSize.width, layout.canvasSize.height)
-                    let stickerSize = stickerSize(
-                        for: sticker,
-                        baseLength: baseLength,
-                        scale: CGFloat(imageWatermarkScale)
-                    )
-
-                    Image(uiImage: sticker)
-                        .resizable()
-                        .frame(width: stickerSize.width,
-                               height: stickerSize.height)
-                        .opacity(imageWatermarkOpacity)
-                        .position(
-                            x: layout.canvasSize.width * imageWatermarkX,
-                            y: layout.canvasSize.height * imageWatermarkY
-                        )
-                        .transaction { $0.animation = nil }
-                        .gesture(
-                            DragGesture()
-                                .onChanged { value in
-                                    // 首次记录拖动起点（归一化坐标），后续都基于 translation 做增量更新
-                                    if !isDraggingImageWatermark {
-                                        isDraggingImageWatermark = true
-                                        imageDragStartX = imageWatermarkX
-                                        imageDragStartY = imageWatermarkY
-                                    }
-
-                                    let canvasWidth = layout.canvasSize.width
-                                    let canvasHeight = layout.canvasSize.height
-
-                                    // 当前图像一半宽高换算成归一化坐标，用于保证整张贴纸始终在画布内
-                                    let halfWidthNorm = (stickerSize.width / 2) / canvasWidth
-                                    let halfHeightNorm = (stickerSize.height / 2) / canvasHeight
-
-                                    // 允许的最小 / 最大中心位置（保证整张图都在画布内）
-                                    let minX = halfWidthNorm
-                                    let maxX = 1 - halfWidthNorm
-                                    let minY = halfHeightNorm
-                                    let maxY = 1 - halfHeightNorm
-
-                                    // 将手指的 translation 转换成归一化位移（相对于画布宽高）
-                                    let dx = value.translation.width / canvasWidth
-                                    let dy = value.translation.height / canvasHeight
-
-                                    var x = imageDragStartX + dx
-                                    var y = imageDragStartY + dy
-
-                                    // 先做基本的边界约束，保证图片不出画布
-                                    x = min(max(x, minX), maxX)
-                                    y = min(max(y, minY), maxY)
-
-                                    let snapThreshold: CGFloat = 0.03
-                                    let edgeSnapThreshold: CGFloat = 0.02
-
-                                    // 默认关闭中心辅助线
-                                    showVerticalGuide = false
-                                    showHorizontalGuide = false
-
-                                    // 中心吸附
-                                    if abs(x - 0.5) < snapThreshold {
-                                        x = 0.5
-                                        showVerticalGuide = true
-                                    }
-                                    if abs(y - 0.5) < snapThreshold {
-                                        y = 0.5
-                                        showHorizontalGuide = true
-                                    }
-
-                                    // 底部边框中心吸附（仅当存在明显的上下边框时）
-                                    if let borderCenterY = bottomBorderCenterY,
-                                       abs(y - borderCenterY) < snapThreshold {
-                                        y = borderCenterY
-                                    }
-
-                                    // 左右边框中心吸附（仅当存在明显的左右边框时）
-                                    if let leftCenterX = leftBorderCenterX,
-                                       abs(x - leftCenterX) < snapThreshold {
-                                        x = leftCenterX
-                                    } else if let rightCenterX = rightBorderCenterX,
-                                              abs(x - rightCenterX) < snapThreshold {
-                                        x = rightCenterX
-                                    }
-
-                                    // 边缘吸附：让图片边缘与画布边缘刚好重合
-                                    let leftCenter = minX     // 左边缘对齐时的中心 X
-                                    let rightCenter = maxX    // 右边缘对齐时的中心 X
-                                    let topCenter = minY      // 上边缘对齐时的中心 Y
-                                    let bottomCenter = maxY   // 下边缘对齐时的中心 Y
-
-                                    if abs(x - leftCenter) < snapThreshold {
-                                        x = leftCenter
-                                    } else if abs(x - rightCenter) < snapThreshold {
-                                        x = rightCenter
-                                    }
-
-                                    // 垂直方向同理（顶部 / 底部），用更小的 edgeSnapThreshold
-                                    if abs(y - topCenter) < edgeSnapThreshold {
-                                        y = topCenter
-                                    } else if abs(y - bottomCenter) < edgeSnapThreshold {
-                                        y = bottomCenter
-                                    }
-
-                                    imageWatermarkX = x
-                                    imageWatermarkY = y
-                                }
-                                .onEnded { _ in
-                                    showVerticalGuide = false
-                                    showHorizontalGuide = false
-                                    isDraggingImageWatermark = false
-                                }
-                        )
-                }
-
-                // 文字水印预览：可在画布上自由拖动，支持按文字宽度自适应的边缘吸附
-                if !watermarkText.isEmpty {
-                    Text(watermarkText)
-                        .font(watermarkSwiftUIFont)
-                        .foregroundColor(watermarkColor)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: layout.canvasSize.width * 0.8)
-                        .shadow(color: Color.black.opacity(0.4),
-                                radius: 3, x: 1, y: 1)
-                        .transaction { $0.animation = nil }
-                        .position(
-                            x: layout.canvasSize.width * watermarkX,
-                            y: layout.canvasSize.height * watermarkY
-                        )
-                        .gesture(
-                            DragGesture()
-                                .onChanged { value in
-                                    // 首次记录拖动起点（归一化坐标），后续都基于 translation 做增量更新
-                                    if !isDraggingTextWatermark {
-                                        isDraggingTextWatermark = true
-                                        textDragStartX = watermarkX
-                                        textDragStartY = watermarkY
-                                    }
-
-                                    let canvasWidth = layout.canvasSize.width
-                                    let canvasHeight = layout.canvasSize.height
-
-                                    // 使用预先测量好的文字尺寸（本次 body 计算内的常量）
-                                    var halfWidthNorm = (measuredTextSize.width / max(canvasWidth, 1)) / 2
-                                    var halfHeightNorm = (measuredTextSize.height / max(canvasHeight, 1)) / 2
-
-                                    // 避免极端情况下超出范围
-                                    halfWidthNorm = min(max(halfWidthNorm, 0.02), 0.48)
-                                    halfHeightNorm = min(max(halfHeightNorm, 0.02), 0.48)
-
-                                    // 将手指的 translation 转换成归一化位移（相对于画布宽高）
-                                    let dx = value.translation.width / canvasWidth
-                                    let dy = value.translation.height / canvasHeight
-
-                                    var x = textDragStartX + dx
-                                    var y = textDragStartY + dy
-
-                                    // 保证整段文字始终在画布内部
-                                    x = min(max(x, halfWidthNorm), 1 - halfWidthNorm)
-                                    y = min(max(y, halfHeightNorm), 1 - halfHeightNorm)
-
-                                    let snapThreshold: CGFloat = 0.03
-                                    let edgeSnapThreshold: CGFloat = 0.02
-
-                                    // 默认关闭辅助线
-                                    showVerticalGuide = false
-                                    showHorizontalGuide = false
-
-                                    // 中心吸附：靠近 0.5 时自动吸附并显示辅助线
-                                    if abs(x - 0.5) < snapThreshold {
-                                        x = 0.5
-                                        showVerticalGuide = true
-                                    }
-                                    if abs(y - 0.5) < snapThreshold {
-                                        y = 0.5
-                                        showHorizontalGuide = true
-                                    }
-
-                                    // 底部边框中心吸附（仅当存在明显的上下边框时）
-                                    if let borderCenterY = bottomBorderCenterY,
-                                       abs(y - borderCenterY) < snapThreshold {
-                                        y = borderCenterY
-                                    }
-
-                                    // 左右边框中心吸附（仅当存在明显的左右边框时）
-                                    if let leftCenterX = leftBorderCenterX,
-                                       abs(x - leftCenterX) < snapThreshold {
-                                        x = leftCenterX
-                                    } else if let rightCenterX = rightBorderCenterX,
-                                              abs(x - rightCenterX) < snapThreshold {
-                                        x = rightCenterX
-                                    }
-
-                                    // 水平边缘吸附：左 / 右边缘根据文字宽度计算中心位置
-                                    let leftCenter = halfWidthNorm
-                                    let rightCenter = 1 - halfWidthNorm
-                                    if abs(x - leftCenter) < snapThreshold {
-                                        x = leftCenter
-                                    } else if abs(x - rightCenter) < snapThreshold {
-                                        x = rightCenter
-                                    }
-
-                                    // 垂直方向同理（顶部 / 底部），用更小的 edgeSnapThreshold
-                                    let topCenter = halfHeightNorm
-                                    let bottomCenter = 1 - halfHeightNorm
-                                    if abs(y - topCenter) < edgeSnapThreshold {
-                                        y = topCenter
-                                    } else if abs(y - bottomCenter) < edgeSnapThreshold {
-                                        y = bottomCenter
-                                    }
-
-                                    watermarkX = x
-                                    watermarkY = y
-                                }
-                                .onEnded { _ in
-                                    // 结束拖动后隐藏辅助线并重置拖动状态
-                                    showVerticalGuide = false
-                                    showHorizontalGuide = false
-                                    isDraggingTextWatermark = false
-                                }
-                        )
-                }
-
-                // 中心辅助线（仅在吸附状态下显示，画在最上层）
-                if showVerticalGuide {
-                    Rectangle()
-                        .fill(Color.white.opacity(0.4))
-                        .frame(width: 1)
-                        .frame(height: layout.canvasSize.height)
-                }
-
-                if showHorizontalGuide {
-                    Rectangle()
-                        .fill(Color.white.opacity(0.4))
-                        .frame(height: 1)
-                        .frame(width: layout.canvasSize.width)
-                }
-            }
-            .frame(width: layout.canvasSize.width,
-                   height: layout.canvasSize.height)
-            .position(x: geo.size.width / 2,
-                      y: geo.size.height / 2)
-        }
+        UIKitPreviewCanvas(
+            image: image,
+            backgroundColor: UIColor(backgroundColor),
+            borderPercent: borderPercent,
+            aspectWidth: customAspectWidth,
+            aspectHeight: customAspectHeight,
+            activeTool: selectedTool,
+            watermarkText: watermarkText,
+            watermarkScale: watermarkScale,
+            watermarkFontName: watermarkFontName,
+            watermarkColor: UIColor(watermarkColor),
+            watermarkX: $watermarkX,
+            watermarkY: $watermarkY,
+            stickerImage: selectedStickerImage,
+            stickerScale: imageWatermarkScale,
+            stickerOpacity: imageWatermarkOpacity,
+            stickerX: $imageWatermarkX,
+            stickerY: $imageWatermarkY
+        )
     }
-    
-    
-    
-    /// 预览布局计算：根据原图和可用区域，计算预览画布尺寸和图片绘制尺寸
-    /// 根据原始图片和目标基准长度计算贴纸尺寸，保持原始宽高比
-    private func stickerSize(for sticker: UIImage,
-                             baseLength: CGFloat,
-                             scale: CGFloat) -> CGSize {
-        let target = baseLength * scale
-        let originalSize = sticker.size
-        let ratio = originalSize.width / max(originalSize.height, 0.1)
-
-        if ratio >= 1 {
-            return CGSize(width: target,
-                          height: target / max(ratio, 0.1))
-        } else {
-            return CGSize(width: target * ratio,
-                          height: target)
-        }
-    }
-    private func computePreviewLayout(for image: UIImage,
-                                      in availableSize: CGSize) -> (canvasSize: CGSize, imageSize: CGSize) {
-        // 1. 读取原图尺寸 & 计算目标边框宽度
-        let origSize = image.size
-        let origWidth = origSize.width
-        let origHeight = origSize.height
-        let longestOrig = max(origWidth, origHeight)
-        
-        // 与导出相同的边框计算：最窄边 = 图片最长边的百分比
-        let clampedPercent = max(min(borderPercent, 100), 1)
-        let borderWidth = longestOrig * CGFloat(clampedPercent / 100.0)
-        
-        // 2. 根据当前成品比例模式，计算目标画布宽高比
-        let targetAspect: CGFloat = canvasAspect(for: image) // Wc / Hc
-        
-        // 3. 在“理论尺寸”下计算画布大小：保证某一方向留白 = borderWidth
-        let baseCanvasSize: CGSize = {
-            if origWidth + 2 * borderWidth >= targetAspect * (origHeight + 2 * borderWidth) {
-                // 水平方向是最窄边
-                let canvasWidth = origWidth + 2 * borderWidth
-                let canvasHeight = canvasWidth / targetAspect
-                return CGSize(width: canvasWidth, height: canvasHeight)
-            } else {
-                // 垂直方向是最窄边
-                let canvasHeight = origHeight + 2 * borderWidth
-                let canvasWidth = targetAspect * canvasHeight
-                return CGSize(width: canvasWidth, height: canvasHeight)
-            }
-        }()
-        
-        let canvasWidth = baseCanvasSize.width
-        let canvasHeight = baseCanvasSize.height
-        
-        // 4. 计算在理论画布中原图应有的尺寸（只缩小，不放大）
-        let scaleToFit = min(canvasWidth / origWidth, canvasHeight / origHeight)
-        let imageScale = min(scaleToFit, 1.0)
-        
-        let drawWidth = origWidth * imageScale
-        let drawHeight = origHeight * imageScale
-        
-        // 5. 将理论画布整体缩放以适配预览区域大小（预览 = 导出整体等比缩小）
-        let previewScale = min(availableSize.width / canvasWidth,
-                               availableSize.height / canvasHeight)
-        
-        let previewCanvasWidth = canvasWidth * previewScale
-        let previewCanvasHeight = canvasHeight * previewScale
-        let previewImageWidth = drawWidth * previewScale
-        let previewImageHeight = drawHeight * previewScale
-        
-        let canvasSize = CGSize(width: previewCanvasWidth, height: previewCanvasHeight)
-        let imageSize = CGSize(width: previewImageWidth, height: previewImageHeight)
-        
-        return (canvasSize, imageSize)
-    }
-    
     // MARK: - 控制区域视图（参数卡片）
 
     /// 参数区域：根据不同工具显示不同参数面板，外部是矩形 Liquid Glass 大面板（高度随内容自适应，内容超出时允许滚动）
@@ -551,8 +139,6 @@ struct ContentView: View {
                         backgroundColor: $backgroundColor,
                         customAspectWidth: $customAspectWidth,
                         customAspectHeight: $customAspectHeight,
-                        capsuleHighlightStart: capsuleHighlightStart,
-                        capsuleHighlightEnd: capsuleHighlightEnd,
                         onTapAspectEditor: { showingAspectEditor = true },
                         onRotateAspect: {
                             let tmp = customAspectWidth
@@ -571,8 +157,6 @@ struct ContentView: View {
                         watermarkColor: $watermarkColor,
                         watermarkText: $watermarkText,
                         watermarkFocus: $isWatermarkFieldFocused,
-                        capsuleHighlightStart: capsuleHighlightStart,
-                        capsuleHighlightEnd: capsuleHighlightEnd,
                         onTapFontPicker: { showingFontPicker = true }
                     )
                 case .imageWatermark:
@@ -654,18 +238,21 @@ struct ContentView: View {
                         Button("分享") {
                             shareImageViaActivityView()
                         }
-                        .disabled(inputImage == nil)
+                        .disabled(inputImage == nil || isRenderingOutput)
 
                         Button("保存") {
                             saveImageWithBackground()
                         }
-                        .disabled(inputImage == nil)
+                        .disabled(inputImage == nil || isRenderingOutput)
                     }
                 }
             }
         }
         .sheet(isPresented: $showingImagePicker) {
             ImagePicker(image: $inputImage)
+        }
+        .onChange(of: inputImage) { _, newValue in
+            updatePreviewImage(for: newValue)
         }
         .sheet(isPresented: $showingImageWatermarkPicker) {
             ImagePicker(image: $watermarkPickerImage)
@@ -721,36 +308,42 @@ struct ContentView: View {
             Text(saveErrorMessage)
         }
         .onAppear {
-            // 启动时从磁盘加载上一次保存的图片水印
-            loadPersistedImageWatermarks()
+            // 首帧先显示界面，再延后加载历史图片水印，减少冷启动等待感。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                loadPersistedImageWatermarks()
+            }
         }
     }
 
     // MARK: - 单个 Tab 页面布局（共享预览区域，不同参数面板）
     @ViewBuilder
     private func mainPage(for tool: EditingTool) -> some View {
-        GeometryReader { proxy in
-            let previewSide = proxy.size.width
+        if selectedTool == tool {
+            GeometryReader { proxy in
+                let previewSide = proxy.size.width
 
-            ZStack(alignment: .bottom) {
-                Color(UIColor.systemGray4)
-                    .ignoresSafeArea()
+                ZStack(alignment: .bottom) {
+                    Color(UIColor.systemGray4)
+                        .ignoresSafeArea()
 
-                // 预览区域：固定在上方，底部空间由参数面板和系统键盘自动协调
-                VStack(spacing: 12) {
-                    previewArea
-                        .frame(width: previewSide, height: previewSide)
-                        .clipped()
-                        .padding(.top, 16)
-                        .padding(.bottom, 9)
+                    // 预览区域：固定在上方，底部空间由参数面板和系统键盘自动协调
+                    VStack(spacing: 12) {
+                        previewArea
+                            .frame(width: previewSide, height: previewSide)
+                            .clipped()
+                            .padding(.top, 16)
+                            .padding(.bottom, 9)
 
-                    Spacer()
+                        Spacer()
+                    }
+
+                    // 底部参数区域：浮动在底部，高度固定，系统负责键盘避让
+                    controlPanel(for: tool)
+                        .padding(.bottom, panelOuterPadding)
                 }
-
-                // 底部参数区域：浮动在底部，高度固定，系统负责键盘避让
-                controlPanel(for: tool)
-                    .padding(.bottom, panelOuterPadding)
             }
+        } else {
+            Color.clear
         }
     }
     
@@ -773,28 +366,59 @@ struct ContentView: View {
 
     // MARK: - 保存：生成纯色背景 + 不裁剪的原图（单张）
     private func saveImageWithBackground() {
-        guard let originalImage = inputImage else { return }
+        guard let originalImage = inputImage, !isRenderingOutput else { return }
 
         let config = makeRenderConfig(for: originalImage)
-        let renderedImage = RenderService.render(config: config)
+        isRenderingOutput = true
 
-        SaveService.saveToPhotos(image: renderedImage) { result in
-            switch result {
-            case .success:
-                showSaveSuccessAlert = true
-            case .failure(let error):
-                saveErrorMessage = error.localizedDescription
-                showSaveErrorAlert = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let renderedImage = RenderService.render(config: config)
+
+            SaveService.saveToPhotos(image: renderedImage) { result in
+                isRenderingOutput = false
+                switch result {
+                case .success:
+                    showSaveSuccessAlert = true
+                case .failure(let error):
+                    saveErrorMessage = error.localizedDescription
+                    showSaveErrorAlert = true
+                }
             }
         }
     }
 
     // MARK: - 分享：通过系统 Activity View 分享当前成品图
     private func shareImageViaActivityView() {
-        guard let originalImage = inputImage else { return }
+        guard let originalImage = inputImage, !isRenderingOutput else { return }
 
-        let renderedImage = RenderService.render(config: makeRenderConfig(for: originalImage))
-        sharePayload = SharePayload(image: renderedImage)
+        let config = makeRenderConfig(for: originalImage)
+        isRenderingOutput = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let renderedImage = RenderService.render(config: config)
+
+            DispatchQueue.main.async {
+                isRenderingOutput = false
+                sharePayload = SharePayload(image: renderedImage)
+            }
+        }
+    }
+
+    private func updatePreviewImage(for image: UIImage?) {
+        let generationID = UUID()
+        previewGenerationID = generationID
+        previewImage = nil
+
+        guard let image else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let resizedImage = image.resizedForPreview(maxPixelLength: 1600)
+
+            DispatchQueue.main.async {
+                guard previewGenerationID == generationID else { return }
+                previewImage = resizedImage
+            }
+        }
     }
 
     /// 组装保存和分享共用的渲染配置，避免两个导出入口发生参数漂移。
@@ -1002,59 +626,6 @@ extension View {
 }
 
 
-// MARK: - 设备姿态管理，用于 Liquid Glass 高光方向（仿 Apple 官方动态高光）
-
-final class MotionManager: ObservableObject {
-    @Published var lightDirection: CGPoint = CGPoint(x: 0.4, y: 0.2)
-
-    private let manager = CMMotionManager()
-    private let queue = OperationQueue()
-    
-    init() {
-        // 约 10fps 更新一次，进一步降低刷新频率，减少对 SwiftUI 重绘的压力
-        manager.deviceMotionUpdateInterval = 1.0 / 10.0
-        queue.qualityOfService = .userInteractive
-
-        if manager.isDeviceMotionAvailable {
-            manager.startDeviceMotionUpdates(to: queue) { [weak self] motion, _ in
-                guard let self = self,
-                      let attitude = motion?.attitude else { return }
-
-                // 将 roll / pitch 映射到 -1...1 范围
-                let rollNorm = max(min(attitude.roll / (.pi / 2), 1), -1)
-                let pitchNorm = max(min(attitude.pitch / (.pi / 2), 1), -1)
-
-                // 计算新的高光方向（0~1）
-                let x = 0.5 + CGFloat(rollNorm) * 0.35
-                let y = 0.3 - CGFloat(pitchNorm) * 0.25
-
-                let clampedX = min(max(x, 0.0), 1.0)
-                let clampedY = min(max(y, 0.0), 1.0)
-                let newDirection = CGPoint(x: clampedX, y: clampedY)
-
-                // 简单阈值过滤：只有变化明显时才触发 UI 更新，减少 SwiftUI 重绘
-                let dx = newDirection.x - self.lightDirection.x
-                let dy = newDirection.y - self.lightDirection.y
-                let distanceSquared = dx * dx + dy * dy
-
-                // 阈值越大，高光移动越“稳”，UI 更新越少；这里适当调大，进一步减少不必要的 UI 更新
-                if distanceSquared < 0.006 {
-                    return
-                }
-
-                DispatchQueue.main.async {
-                    self.lightDirection = newDirection
-                }
-            }
-        }
-    }
-
-    deinit {
-        manager.stopDeviceMotionUpdates()
-    }
-}
-
-
 /// 自定义画幅比例界面（标准表单样式）
 struct CustomAspectRatioView: View {
     @Binding var width: Double
@@ -1122,9 +693,6 @@ private struct BorderControlsPanel: View {
     @Binding var backgroundColor: Color
     @Binding var customAspectWidth: Double
     @Binding var customAspectHeight: Double
-    
-    var capsuleHighlightStart: UnitPoint
-    var capsuleHighlightEnd: UnitPoint
     
     var onTapAspectEditor: () -> Void
     var onRotateAspect: () -> Void
@@ -1277,9 +845,6 @@ private struct WatermarkControlsPanel: View {
     
     /// 来自父级的 FocusState 绑定，用于控制键盘焦点
     var watermarkFocus: FocusState<Bool>.Binding
-    
-    var capsuleHighlightStart: UnitPoint
-    var capsuleHighlightEnd: UnitPoint
     
     var onTapFontPicker: () -> Void
     
@@ -1464,22 +1029,5 @@ private struct ImageWatermarkControlsPanel: View {
                 .padding(.vertical, 2)
             }
         }
-    }
-}
-
-// MARK: - ActivityView：封装 UIActivityViewController 供 SwiftUI 调用
-struct ActivityView: UIViewControllerRepresentable {
-    var activityItems: [Any]
-    var applicationActivities: [UIActivity]? = nil
-    
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(
-            activityItems: activityItems,
-            applicationActivities: applicationActivities
-        )
-    }
-    
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {
-        // 无需更新
     }
 }

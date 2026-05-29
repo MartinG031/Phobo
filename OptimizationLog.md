@@ -1,0 +1,37 @@
+# Phobo Optimization Log
+
+记录每次性能或架构优化，后续改动继续追加到本文件。
+
+## 2026-05-29
+
+### Performance: Preview and Export Responsiveness
+
+- Removed unused device-motion driven state updates from the root SwiftUI view.
+- Moved save/share output rendering off the main thread.
+- Added a downsampled preview image path so interactive preview does not use full-resolution photo data.
+- Reduced redundant state writes during watermark dragging.
+
+Verification:
+
+- `xcodebuild -scheme Phobo -project Phobo.xcodeproj -configuration Debug -destination 'generic/platform=iOS Simulator' build`
+
+### Performance: UIKit Preview Canvas
+
+- Replaced the SwiftUI preview composition path with a UIKit-backed preview canvas.
+- Moved image, text watermark, sticker watermark, guide line drawing, and drag hit-testing into `PreviewCanvasUIView`.
+- Kept final export on `RenderService` so output quality and file generation remain unchanged.
+
+Verification:
+
+- `xcodebuild -scheme Phobo -project Phobo.xcodeproj -configuration Debug -destination 'generic/platform=iOS Simulator' build`
+
+### Architecture: Split Preview Layer
+
+- Extracted `EditingTool` from `ContentView.swift` into `EditingTool.swift`.
+- Extracted the UIKit preview bridge and drawing view into `UIKitPreviewCanvas.swift`.
+- Extracted the share sheet bridge into `ActivityView.swift`.
+- Extracted preview-image resizing into `UIImage+PreviewResize.swift`.
+
+Verification:
+
+- `xcodebuild -scheme Phobo -project Phobo.xcodeproj -configuration Debug -destination 'generic/platform=iOS Simulator' build`
