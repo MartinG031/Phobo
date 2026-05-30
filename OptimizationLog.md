@@ -48,3 +48,45 @@ Verification:
 Verification:
 
 - `xcodebuild -scheme Phobo -project Phobo.xcodeproj -configuration Debug -destination 'generic/platform=iOS Simulator' build`
+
+### Architecture: Editor State Extraction
+
+- Added `EditorState` to group canvas, text watermark, image watermark, and selected tool state.
+- Moved selected sticker lookup, image watermark insertion/deletion, and render config assembly out of `ContentView`.
+- Kept transient UI state such as sheets, alerts, focus, and rendering progress in `ContentView`.
+- Reduced `ContentView` responsibility so the next architecture pass can target image loading/output orchestration separately.
+
+Verification:
+
+- `xcodebuild -scheme Phobo -project Phobo.xcodeproj -configuration Debug -destination 'generic/platform=iOS Simulator' build`
+
+### Architecture: Image Pipeline Extraction
+
+- Added `ImagePipeline` as the owner of selected original image, downsampled preview image, rendering progress, save alerts, and share payload.
+- Moved preview downsampling cancellation and save/share rendering orchestration out of `ContentView`.
+- Kept render configuration creation in `EditorState` so output parameters remain centralized.
+- Removed direct background rendering and preview generation state from `ContentView`.
+
+Verification:
+
+- `xcodebuild -scheme Phobo -project Phobo.xcodeproj -configuration Debug -destination 'generic/platform=iOS Simulator' build`
+
+### Architecture: Control Panel Component Split
+
+- Moved border, text watermark, and image watermark control panels into `ControlPanels.swift`.
+- Moved shared UI helpers, custom aspect ratio editing, and system font picker into `SharedUI.swift`.
+- Reduced `ContentView.swift` from 968 lines to 350 lines, leaving it focused on screen composition and interaction routing.
+
+Verification:
+
+- `xcodebuild -scheme Phobo -project Phobo.xcodeproj -configuration Debug -destination 'generic/platform=iOS Simulator' build`
+
+### Architecture: Image Watermark Persistence Boundary
+
+- Added image watermark restore/save helpers to `EditorState`.
+- Removed the `ContentView` persistence extension so the view no longer knows how selected watermark indexes are persisted.
+- Kept delayed loading after first frame to preserve the previous cold-start responsiveness improvement.
+
+Verification:
+
+- `xcodebuild -scheme Phobo -project Phobo.xcodeproj -configuration Debug -destination 'generic/platform=iOS Simulator' build`
