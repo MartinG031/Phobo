@@ -35,3 +35,16 @@ Verification:
 Verification:
 
 - `xcodebuild -scheme Phobo -project Phobo.xcodeproj -configuration Debug -destination 'generic/platform=iOS Simulator' build`
+
+## 2026-05-30
+
+### Architecture: Shared Canvas Layout Engine
+
+- Added `CanvasLayoutEngine` as the single source of truth for base canvas, preview layout, and export layout geometry.
+- Updated `UIKitPreviewCanvas` to use `CanvasLayoutEngine.previewLayout`.
+- Updated `RenderService` to use `CanvasLayoutEngine.renderLayout`.
+- Reduced preview/export drift risk by removing duplicate canvas sizing math.
+
+Verification:
+
+- `xcodebuild -scheme Phobo -project Phobo.xcodeproj -configuration Debug -destination 'generic/platform=iOS Simulator' build`

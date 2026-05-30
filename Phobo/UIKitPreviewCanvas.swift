@@ -92,11 +92,6 @@ final class PreviewCanvasUIView: UIView {
         let stickerY: CGFloat
     }
 
-    struct Layout {
-        let canvasRect: CGRect
-        let imageRect: CGRect
-    }
-
     var configuration: Configuration? {
         didSet { setNeedsDisplay() }
     }
@@ -225,7 +220,7 @@ final class PreviewCanvasUIView: UIView {
         }
     }
 
-    private func target(at point: CGPoint, config: Configuration, layout: Layout) -> DragTarget? {
+    private func target(at point: CGPoint, config: Configuration, layout: CanvasLayout) -> DragTarget? {
         switch config.activeTool {
         case .watermark:
             guard !config.watermarkText.isEmpty else { return nil }
@@ -238,46 +233,17 @@ final class PreviewCanvasUIView: UIView {
         }
     }
 
-    private func makeLayout(for config: Configuration, in availableSize: CGSize) -> Layout? {
-        let imageSize = config.image.size
-        let origWidth = max(imageSize.width, 1)
-        let origHeight = max(imageSize.height, 1)
-        let longestOrig = max(origWidth, origHeight)
-        let clampedPercent = max(min(config.borderPercent, 100), 1)
-        let borderWidth = longestOrig * CGFloat(clampedPercent / 100.0)
-        let aspect = CGFloat(max(config.aspectWidth, 0.01) / max(config.aspectHeight, 0.01))
-
-        let baseCanvasSize: CGSize
-        if origWidth + 2 * borderWidth >= aspect * (origHeight + 2 * borderWidth) {
-            let canvasWidth = origWidth + 2 * borderWidth
-            baseCanvasSize = CGSize(width: canvasWidth, height: canvasWidth / aspect)
-        } else {
-            let canvasHeight = origHeight + 2 * borderWidth
-            baseCanvasSize = CGSize(width: aspect * canvasHeight, height: canvasHeight)
-        }
-
-        let scaleToFit = min(baseCanvasSize.width / origWidth, baseCanvasSize.height / origHeight)
-        let imageScale = min(scaleToFit, 1.0)
-        let previewScale = min(availableSize.width / baseCanvasSize.width,
-                               availableSize.height / baseCanvasSize.height)
-        guard previewScale.isFinite, previewScale > 0 else { return nil }
-
-        let canvasSize = CGSize(width: baseCanvasSize.width * previewScale,
-                                height: baseCanvasSize.height * previewScale)
-        let canvasOrigin = CGPoint(x: (availableSize.width - canvasSize.width) / 2,
-                                   y: (availableSize.height - canvasSize.height) / 2)
-        let imageDrawSize = CGSize(width: origWidth * imageScale * previewScale,
-                                   height: origHeight * imageScale * previewScale)
-        let imageOrigin = CGPoint(x: canvasOrigin.x + (canvasSize.width - imageDrawSize.width) / 2,
-                                  y: canvasOrigin.y + (canvasSize.height - imageDrawSize.height) / 2)
-
-        return Layout(
-            canvasRect: CGRect(origin: canvasOrigin, size: canvasSize),
-            imageRect: CGRect(origin: imageOrigin, size: imageDrawSize)
+    private func makeLayout(for config: Configuration, in availableSize: CGSize) -> CanvasLayout? {
+        CanvasLayoutEngine.previewLayout(
+            imageSize: config.image.size,
+            availableSize: availableSize,
+            borderPercent: config.borderPercent,
+            aspectWidth: config.aspectWidth,
+            aspectHeight: config.aspectHeight
         )
     }
 
-    private func stickerRect(for sticker: UIImage, config: Configuration, layout: Layout) -> CGRect {
+    private func stickerRect(for sticker: UIImage, config: Configuration, layout: CanvasLayout) -> CGRect {
         let size = stickerSize(for: sticker,
                                baseLength: min(layout.canvasRect.width, layout.canvasRect.height),
                                scale: CGFloat(config.stickerScale))
@@ -289,7 +255,7 @@ final class PreviewCanvasUIView: UIView {
                       height: size.height)
     }
 
-    private func watermarkTextRect(config: Configuration, layout: Layout) -> CGRect {
+    private func watermarkTextRect(config: Configuration, layout: CanvasLayout) -> CGRect {
         let maxWidth = max(layout.canvasRect.width * 0.8, 1)
         let attributes = watermarkTextAttributes(config: config, layout: layout)
         let text = config.watermarkText as NSString
@@ -307,7 +273,7 @@ final class PreviewCanvasUIView: UIView {
                       height: size.height)
     }
 
-    private func watermarkTextAttributes(config: Configuration, layout: Layout) -> [NSAttributedString.Key: Any] {
+    private func watermarkTextAttributes(config: Configuration, layout: CanvasLayout) -> [NSAttributedString.Key: Any] {
         let fontSize = min(layout.canvasRect.width, layout.canvasRect.height) * CGFloat(config.watermarkScale)
         let font: UIFont
         if config.watermarkFontName == "System" {
@@ -329,7 +295,7 @@ final class PreviewCanvasUIView: UIView {
         ]
     }
 
-    private func dragItemSize(for target: DragTarget, config: Configuration, layout: Layout) -> CGSize {
+    private func dragItemSize(for target: DragTarget, config: Configuration, layout: CanvasLayout) -> CGSize {
         switch target {
         case .watermark:
             return watermarkTextRect(config: config, layout: layout).size
@@ -342,7 +308,7 @@ final class PreviewCanvasUIView: UIView {
     private func snappedPosition(x: CGFloat,
                                  y: CGFloat,
                                  itemSize: CGSize,
-                                 layout: Layout) -> (x: CGFloat, y: CGFloat, showVerticalGuide: Bool, showHorizontalGuide: Bool) {
+                                 layout: CanvasLayout) -> (x: CGFloat, y: CGFloat, showVerticalGuide: Bool, showHorizontalGuide: Bool) {
         var x = x
         var y = y
 
@@ -394,7 +360,7 @@ final class PreviewCanvasUIView: UIView {
         return (x, y, showVerticalGuide, showHorizontalGuide)
     }
 
-    private func bottomBorderCenterY(layout: Layout) -> CGFloat? {
+    private func bottomBorderCenterY(layout: CanvasLayout) -> CGFloat? {
         let borderHeight = layout.canvasRect.height - layout.imageRect.height
         guard borderHeight / max(layout.canvasRect.height, 1) > 0.05 else { return nil }
         let imageBottom = (layout.canvasRect.height + layout.imageRect.height) / 2
@@ -402,7 +368,7 @@ final class PreviewCanvasUIView: UIView {
         return bottomCenter / layout.canvasRect.height
     }
 
-    private func leftBorderCenterX(layout: Layout) -> CGFloat? {
+    private func leftBorderCenterX(layout: CanvasLayout) -> CGFloat? {
         let totalBorderWidth = layout.canvasRect.width - layout.imageRect.width
         guard totalBorderWidth > 0 else { return nil }
         let sideBorderWidth = totalBorderWidth / 2
@@ -410,7 +376,7 @@ final class PreviewCanvasUIView: UIView {
         return (sideBorderWidth / 2) / layout.canvasRect.width
     }
 
-    private func rightBorderCenterX(layout: Layout) -> CGFloat? {
+    private func rightBorderCenterX(layout: CanvasLayout) -> CGFloat? {
         guard let left = leftBorderCenterX(layout: layout) else { return nil }
         return 1 - left
     }
