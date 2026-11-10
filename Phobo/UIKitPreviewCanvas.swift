@@ -72,7 +72,7 @@ struct UIKitPreviewCanvas: UIViewRepresentable {
 }
 
 final class PreviewCanvasUIView: UIView {
-    struct Configuration {
+    struct Configuration: Equatable {
         let image: UIImage
         let backgroundColor: UIColor
         let borderPercent: Double
@@ -83,17 +83,21 @@ final class PreviewCanvasUIView: UIView {
         let watermarkScale: Double
         let watermarkFontName: String
         let watermarkColor: UIColor
-        let watermarkX: CGFloat
-        let watermarkY: CGFloat
+        var watermarkX: CGFloat
+        var watermarkY: CGFloat
         let stickerImage: UIImage?
         let stickerScale: Double
         let stickerOpacity: Double
-        let stickerX: CGFloat
-        let stickerY: CGFloat
+        var stickerX: CGFloat
+        var stickerY: CGFloat
     }
 
     var configuration: Configuration? {
-        didSet { setNeedsDisplay() }
+        didSet {
+            if configuration != oldValue {
+                setNeedsDisplay()
+            }
+        }
     }
 
     var onWatermarkPositionChanged: ((CGFloat, CGFloat) -> Void)?
@@ -132,10 +136,11 @@ final class PreviewCanvasUIView: UIView {
 
         if let sticker = config.stickerImage {
             let stickerRect = stickerRect(for: sticker, config: config, layout: layout)
-            context.saveGState()
-            context.setAlpha(CGFloat(config.stickerOpacity))
-            sticker.draw(in: stickerRect)
-            context.restoreGState()
+            sticker.draw(
+                in: stickerRect,
+                blendMode: .normal,
+                alpha: clampedStickerOpacity(config.stickerOpacity)
+            )
         }
 
         if !config.watermarkText.isEmpty {
@@ -195,16 +200,28 @@ final class PreviewCanvasUIView: UIView {
                 layout: layout
             )
 
+            let guidesChanged = showVerticalGuide != snapped.showVerticalGuide
+                || showHorizontalGuide != snapped.showHorizontalGuide
             showVerticalGuide = snapped.showVerticalGuide
             showHorizontalGuide = snapped.showHorizontalGuide
 
             switch dragTarget {
             case .watermark:
-                config = updated(config, watermarkX: snapped.x, watermarkY: snapped.y)
+                guard config.watermarkX != snapped.x || config.watermarkY != snapped.y else {
+                    if guidesChanged { setNeedsDisplay() }
+                    return
+                }
+                config.watermarkX = snapped.x
+                config.watermarkY = snapped.y
                 configuration = config
                 onWatermarkPositionChanged?(snapped.x, snapped.y)
             case .sticker:
-                config = updated(config, stickerX: snapped.x, stickerY: snapped.y)
+                guard config.stickerX != snapped.x || config.stickerY != snapped.y else {
+                    if guidesChanged { setNeedsDisplay() }
+                    return
+                }
+                config.stickerX = snapped.x
+                config.stickerY = snapped.y
                 configuration = config
                 onStickerPositionChanged?(snapped.x, snapped.y)
             }
@@ -393,47 +410,8 @@ final class PreviewCanvasUIView: UIView {
         }
     }
 
-    private func updated(_ config: Configuration, watermarkX: CGFloat, watermarkY: CGFloat) -> Configuration {
-        Configuration(
-            image: config.image,
-            backgroundColor: config.backgroundColor,
-            borderPercent: config.borderPercent,
-            aspectWidth: config.aspectWidth,
-            aspectHeight: config.aspectHeight,
-            activeTool: config.activeTool,
-            watermarkText: config.watermarkText,
-            watermarkScale: config.watermarkScale,
-            watermarkFontName: config.watermarkFontName,
-            watermarkColor: config.watermarkColor,
-            watermarkX: watermarkX,
-            watermarkY: watermarkY,
-            stickerImage: config.stickerImage,
-            stickerScale: config.stickerScale,
-            stickerOpacity: config.stickerOpacity,
-            stickerX: config.stickerX,
-            stickerY: config.stickerY
-        )
+    private func clampedStickerOpacity(_ opacity: Double) -> CGFloat {
+        CGFloat(min(max(opacity, 0), 1))
     }
 
-    private func updated(_ config: Configuration, stickerX: CGFloat, stickerY: CGFloat) -> Configuration {
-        Configuration(
-            image: config.image,
-            backgroundColor: config.backgroundColor,
-            borderPercent: config.borderPercent,
-            aspectWidth: config.aspectWidth,
-            aspectHeight: config.aspectHeight,
-            activeTool: config.activeTool,
-            watermarkText: config.watermarkText,
-            watermarkScale: config.watermarkScale,
-            watermarkFontName: config.watermarkFontName,
-            watermarkColor: config.watermarkColor,
-            watermarkX: config.watermarkX,
-            watermarkY: config.watermarkY,
-            stickerImage: config.stickerImage,
-            stickerScale: config.stickerScale,
-            stickerOpacity: config.stickerOpacity,
-            stickerX: stickerX,
-            stickerY: stickerY
-        )
-    }
 }

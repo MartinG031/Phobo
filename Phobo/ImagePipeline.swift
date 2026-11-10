@@ -27,7 +27,8 @@ final class ImagePipeline: ObservableObject {
         guard !isRenderingOutput else { return }
         isRenderingOutput = true
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard self != nil else { return }
             let renderedImage = RenderService.render(config: config)
 
             SaveService.saveToPhotos(image: renderedImage) { [weak self] result in
@@ -50,7 +51,8 @@ final class ImagePipeline: ObservableObject {
         guard !isRenderingOutput else { return }
         isRenderingOutput = true
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard self != nil else { return }
             let renderedImage = RenderService.render(config: config)
 
             DispatchQueue.main.async { [weak self] in
@@ -68,7 +70,8 @@ final class ImagePipeline: ObservableObject {
 
         guard let image else { return }
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard self != nil else { return }
             let resizedImage = image.resizedForPreview(maxPixelLength: 1600)
 
             DispatchQueue.main.async { [weak self] in

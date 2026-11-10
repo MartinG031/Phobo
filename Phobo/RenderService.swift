@@ -75,7 +75,7 @@ enum RenderService {
                 let rect = CGRect(origin: origin, size: stickerSize)
                 sticker.draw(in: rect,
                              blendMode: .normal,
-                             alpha: CGFloat(config.stickerOpacity))
+                             alpha: clampedStickerOpacity(config.stickerOpacity))
             }
 
             // 文字水印
@@ -133,5 +133,9 @@ enum RenderService {
             return CGSize(width: target * ratio,
                           height: target)
         }
+    }
+
+    private static func clampedStickerOpacity(_ opacity: Double) -> CGFloat {
+        CGFloat(min(max(opacity, 0), 1))
     }
 }

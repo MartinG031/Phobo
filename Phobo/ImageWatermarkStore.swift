@@ -6,11 +6,11 @@ import UIKit
 
 enum ImageWatermarkStore {
     private static let selectedIndexKey = "ImageWatermarkSelectedIndex"
+    private static let ioQueue = DispatchQueue(label: "Martin.Phobo.watermarkStore", qos: .utility)
 
     static func load(completion: @escaping ([UIImage], Int?) -> Void) {
-        let persistedSelectedIndex = UserDefaults.standard.object(forKey: selectedIndexKey) as? Int
-
-        DispatchQueue.global(qos: .userInitiated).async {
+        ioQueue.async {
+            let persistedSelectedIndex = UserDefaults.standard.object(forKey: selectedIndexKey) as? Int
             guard let dir = imageWatermarksDirectoryURL() else {
                 DispatchQueue.main.async {
                     completion([], nil)
@@ -30,7 +30,10 @@ enum ImageWatermarkStore {
                 return
             }
 
-            let sortedFiles = files.sorted { $0.lastPathComponent < $1.lastPathComponent }
+            let sortedFiles = files.filter { $0.pathExtension.lowercased() == "png" }
+                .sorted {
+                    $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedAscending
+                }
 
             var loaded: [UIImage] = []
             for url in sortedFiles {
@@ -57,7 +60,7 @@ enum ImageWatermarkStore {
     }
 
     static func save(images: [UIImage], selectedIndex: Int?) {
-        DispatchQueue.global(qos: .utility).async {
+        ioQueue.async {
             guard let dir = imageWatermarksDirectoryURL() else { return }
 
             let fm = FileManager.default
@@ -80,14 +83,17 @@ enum ImageWatermarkStore {
                     }
                 }
             }
-
-            DispatchQueue.main.async {
-                persistSelectedIndex(selectedIndex, imageCount: images.count)
-            }
+            writeSelectedIndex(selectedIndex, imageCount: images.count)
         }
     }
 
     static func persistSelectedIndex(_ selectedIndex: Int?, imageCount: Int) {
+        ioQueue.async {
+            writeSelectedIndex(selectedIndex, imageCount: imageCount)
+        }
+    }
+
+    private static func writeSelectedIndex(_ selectedIndex: Int?, imageCount: Int) {
         if let index = selectedIndex,
            (0..<imageCount).contains(index) {
             UserDefaults.standard.set(index, forKey: selectedIndexKey)

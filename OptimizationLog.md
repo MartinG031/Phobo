@@ -2,6 +2,31 @@
 
 记录每次性能或架构优化，后续改动继续追加到本文件。
 
+## 2026-09-05
+
+### Preview Updates and Watermark Persistence
+
+- Skip redraws for identical preview configurations, including SwiftUI updates unrelated to the canvas.
+- Mutate only the dragged coordinates and skip redundant position callbacks while snapped in place.
+- Preserve redraws when alignment guides change without a position change.
+- Resize previews using actual pixel dimensions, including 2x/3x UIImage inputs, with invalid-limit guards.
+- Serialize watermark file reads, writes, and selection persistence to prevent overlapping saves and stale selection callbacks.
+- Load numbered watermark files in numeric order so wm_10.png follows wm_9.png.
+
+Verification:
+
+- iOS 27 Debug simulator build succeeded; only the existing AppIntents metadata warning remained.
+- `Scripts/verify_preview.swift` passed on the iOS 27 simulator: 3x pixel resize, invalid limits, image reuse, configuration equality, opacity changes, and position changes.
+- Device interaction and persistence stress testing were not performed.
+
+Run the preview regression checks on a booted Apple Silicon simulator:
+
+```sh
+export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
+xcrun swiftc -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" -target arm64-apple-ios27.0-simulator Phobo/EditingTool.swift Phobo/CanvasLayoutEngine.swift Phobo/UIKitPreviewCanvas.swift Phobo/UIImage+PreviewResize.swift Scripts/verify_preview.swift -o /tmp/phobo-preview-checks
+xcrun simctl spawn booted /tmp/phobo-preview-checks
+```
+
 ## 2026-05-29
 
 ### Performance: Preview and Export Responsiveness

@@ -2,11 +2,13 @@ import UIKit
 
 extension UIImage {
     func resizedForPreview(maxPixelLength: CGFloat) -> UIImage {
-        let longestSide = max(size.width, size.height)
-        guard longestSide > maxPixelLength else { return self }
+        let longestSide = max(size.width, size.height) * self.scale
+        guard maxPixelLength.isFinite, maxPixelLength > 0,
+              longestSide.isFinite, longestSide > maxPixelLength else { return self }
 
         let scale = maxPixelLength / longestSide
-        let targetSize = CGSize(width: size.width * scale, height: size.height * scale)
+        let targetSize = CGSize(width: max(1, (size.width * self.scale * scale).rounded(.down)),
+                                height: max(1, (size.height * self.scale * scale).rounded(.down)))
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = 1
         format.opaque = false

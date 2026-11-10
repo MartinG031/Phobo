@@ -39,7 +39,7 @@ struct SystemFontPickerView: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             List {
                 Section {
                     Button {

@@ -172,7 +172,7 @@ struct ContentView: View {
             }
             .toolbar {
                 // 左侧：选择，使用导航条文本按钮样式（Liquid Glass-text）
-                ToolbarItem(placement: .navigationBarLeading) {
+                ToolbarItem(placement: .topBarLeading) {
                     Button("选择") {
                         // 如果当前在文字水印工具并且正在编辑，则记录状态并先收起键盘
                         if editor.selectedTool == .watermark && isWatermarkFieldFocused {
@@ -186,7 +186,7 @@ struct ContentView: View {
                 }
 
                 // 右侧：分享 + 保存，使用系统导航条文本按钮样式
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .topBarTrailing) {
                     HStack(spacing: 12) {
                         Button("分享") {
                             shareImageViaActivityView()
